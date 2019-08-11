@@ -1,8 +1,8 @@
 import * as commander from 'commander';
-import * as fs from 'fs';
-import * as path from 'path';
 
 import { convertFolder } from './convertFolder';
+import { convertRepository } from './convertRepository';
+import { VERSION } from './config';
 
 export interface GlobalOptions {
   readonly recast: boolean;
@@ -14,16 +14,15 @@ export interface ConvertFolderOptions {
   readonly remove: boolean;
   readonly parent: GlobalOptions;
 }
+export interface ConvertRepositoryOptions {
+  readonly parent: GlobalOptions;
+}
 
 const program = new commander.Command();
 
-const pkg = JSON.parse(
-  fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8')
-);
-
 program
   .name('flowts')
-  .version(pkg.version)
+  .version(VERSION)
   .description('Flow to TypeScript migration toolkit.')
   .option('-R, --no-recast', 'use babel generator instead of recast', false)
   .option('-P, --no-prettier', 'do not run prettier on converted code', false);
@@ -63,6 +62,14 @@ program
         }
       })()
     );
+  });
+
+program
+  .command('repository <path>')
+  .description('Migrate project at specified path')
+  .usage('path/to/git/repository')
+  .action((dir: string, options: ConvertRepositoryOptions) => {
+    handleCommandPromise(convertRepository(dir, options));
   });
 
 program.on('command:*', function() {
