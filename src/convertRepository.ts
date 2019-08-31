@@ -6,11 +6,12 @@ import * as readPkg from 'read-pkg';
 import { PackageJson } from 'read-pkg';
 import { ConvertRepositoryOptions } from './cli';
 import { VERSION } from './config';
+import inquirer from 'inquirer';
 
 interface PackageFileInfo {
   packagePath: string;
   packageData: PackageJson;
-  hasPackageErrors: boolean;
+  // hasPackageErrors: boolean;
 }
 
 type NamedPackageFileInfo = PackageFileInfo & {
@@ -22,6 +23,7 @@ const configFileName = 'flow-ts-config.json';
 function readConfig(configPath: string) {
   return JSON.parse(fs.readFileSync(configPath, { encoding: 'utf8' }));
 }
+
 function writeConfig(configPath: string, configData: any) {
   const data = JSON.stringify(configData, null, 2);
   return fs.writeFileSync(configPath, data, {
@@ -34,7 +36,12 @@ export async function convertRepository(
   options: ConvertRepositoryOptions
 ) {
   const configPath = path.resolve(repoPath, configFileName);
-  let config = {
+  let config: {
+    recast: boolean;
+    packages: { [k: string]: {} };
+    version: string;
+    prettier: boolean;
+  } = {
     version: VERSION,
     prettier: options.parent.prettier,
     recast: options.parent.recast,
@@ -79,9 +86,14 @@ export async function convertRepository(
   });
   console.log(`${packagePaths.length} packages found.`);
   console.log('Processing package data');
+  const newIgnores = [];
+  let newPackages = 0;
   const packages: PackageFileInfo[] = [];
+
+  // todo: rearrange packages into tree before processing
   for (const packagePath of packagePaths) {
-    let packageData;
+    if (config.packages[packagePath]) continue;
+    let packageData!: readPkg.PackageJson;
     let packageErrors;
     let retry = true;
     while (retry) {
@@ -91,26 +103,83 @@ export async function convertRepository(
         });
       } catch (e) {
         packageErrors = e;
-      }
-      if (packageErrors) {
         console.error(`Error loading package.json:\n  - ${packagePath}\n`);
         console.error(packageErrors);
+        const [answer] = await inquirer.prompt([
+          {
+            type: 'list',
+            options: [
+              {
+                name: 'Retry',
+                value: 'retry',
+              },
+              {
+                name: 'Ignore files in package',
+                value: 'ignore',
+              },
+              {
+                name:
+                  'Ignore package (if part of other package - files would be converted)',
+                value: 'ignore-package',
+              },
+            ],
+          },
+        ]);
+
+        if (answer === 'retry') {
+          continue;
+        } else if (answer === 'ignore') {
+          newIgnores.push(path.join(path.dirname(packagePath), '**'));
+        } else if (answer === 'ignore-package') {
+          newIgnores.push(packagePath);
+        } else {
+          console.error('Unexpected choice ' + answer);
+          process.exit(1);
+        }
+      }
+
+      if (!packageData.name) {
+        console.log('Package name if missing in file:\n  ' + packagePath);
+        const [answer] = await inquirer.prompt([
+          {
+            type: 'list',
+            options: [
+              {
+                name:
+                  'Use as unnamed (can not be used as dependency by other packages in repository)',
+                value: 'unnamed',
+              },
+              {
+                name: 'Reload',
+                value: 'retry',
+              },
+            ],
+          },
+        ]);
+
+        if (answer === 'retry') {
+          continue;
+        } else if (answer === 'unnamed') {
+          config.packages[packagePath] = {};
+          newPackages += 1;
+        } else {
+          console.error('Unexpected choice ' + answer);
+          process.exit(1);
+        }
       }
 
       packages.push({
         packagePath,
         packageData,
-        hasPackageErrors: !!packageErrors,
       } as PackageFileInfo);
     }
   }
-  console.log(`${packages.length} successfully loaded`);
+  console.log(`${newPackages} new packages added to configuration`);
   console.log(
     'Checking package names, to detect dependencies between packages'
   );
   const namedPackages = new Map<string, NamedPackageFileInfo>();
   for (const info of packages) {
-    if (info.hasPackageErrors) continue;
     const name = info.packageData.name;
     if (!name) continue;
     const existingNamed = namedPackages.get(name);
@@ -132,10 +201,12 @@ export async function convertRepository(
     namedPackages.set(name, info as NamedPackageFileInfo);
   }
   console.log('Detecting nested packages, to be converted separately');
+
   interface FolderInfo {
     packageInfo?: PackageFileInfo;
     children: Map<string, FolderInfo>;
   }
+
   const rootFolder: FolderInfo = {
     children: new Map(),
     packageInfo: undefined,
@@ -196,6 +267,7 @@ export async function convertRepository(
     }
     return packages;
   }
+
   const packagesWithExcludes = walkFolders(rootFolder);
 
   console.log('Generating configuration for migration');
